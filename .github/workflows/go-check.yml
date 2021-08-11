@@ -1,17 +1,13 @@
-name: linting
+# File managed by web3-bot. DO NOT EDIT.
+# See https://github.com/protocol/.github/ for details.
 
-on:
-  pull_request:
-  push:
-    branches:
-      - master
+on: [push, pull_request]
+name: Go Checks
 
 jobs:
   unit:
     runs-on: ubuntu-latest
     name: All
-    strategy:
-      fail-fast: false
     steps:
       - uses: actions/checkout@v2
         with:
@@ -32,6 +28,7 @@ jobs:
             fi
             git diff --exit-code -- go.sum go.mod
       - name: gofmt
+        if: ${{ success() || failure() }} # run this step even if the previous one failed
         run: |
           out=$(gofmt -s -l .)
           if [[ -n "$out" ]]; then
@@ -39,12 +36,15 @@ jobs:
             exit 1
           fi
       - name: go vet
+        if: ${{ success() || failure() }} # run this step even if the previous one failed
         uses: protocol/multiple-go-modules@v1.0
         with:
           run: go vet ./...
       - name: staticcheck
+        if: ${{ success() || failure() }} # run this step even if the previous one failed
         uses: protocol/multiple-go-modules@v1.0
         with:
           run: |
             set -o pipefail
             staticcheck ./... | sed -e 's@\(.*\)\.go@./\1.go@g'
+
