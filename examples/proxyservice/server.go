@@ -9,7 +9,7 @@ import (
 
 	"time"
 
-	"github.com/grandcat/zeroconf"
+	"github.com/libp2p/zeroconf"
 )
 
 var (
