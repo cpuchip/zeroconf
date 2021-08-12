@@ -37,8 +37,8 @@ func (s *ServiceRecord) ServiceTypeName() string {
 	return s.serviceTypeName
 }
 
-// NewServiceRecord constructs a ServiceRecord.
-func NewServiceRecord(instance, service string, domain string) *ServiceRecord {
+// newServiceRecord constructs a ServiceRecord.
+func newServiceRecord(instance, service string, domain string) *ServiceRecord {
 	service, subtypes := parseSubtypes(service)
 	s := &ServiceRecord{
 		Instance:    instance,
@@ -79,7 +79,7 @@ type lookupParams struct {
 // newLookupParams constructs a lookupParams.
 func newLookupParams(instance, service, domain string, isBrowsing bool, entries chan<- *ServiceEntry) *lookupParams {
 	p := &lookupParams{
-		ServiceRecord: *NewServiceRecord(instance, service, domain),
+		ServiceRecord: *newServiceRecord(instance, service, domain),
 		Entries:       entries,
 		isBrowsing:    isBrowsing,
 	}
@@ -112,9 +112,9 @@ type ServiceEntry struct {
 	AddrIPv6 []net.IP  `json:"-"`        // Host machine IPv6 address
 }
 
-// NewServiceEntry constructs a ServiceEntry.
-func NewServiceEntry(instance, service string, domain string) *ServiceEntry {
+// newServiceEntry constructs a ServiceEntry.
+func newServiceEntry(instance, service string, domain string) *ServiceEntry {
 	return &ServiceEntry{
-		ServiceRecord: *NewServiceRecord(instance, service, domain),
+		ServiceRecord: *newServiceRecord(instance, service, domain),
 	}
 }

@@ -209,7 +209,7 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 						continue
 					}
 					if _, ok := entries[rr.Ptr]; !ok {
-						entries[rr.Ptr] = NewServiceEntry(
+						entries[rr.Ptr] = newServiceEntry(
 							trimDot(strings.Replace(rr.Ptr, rr.Hdr.Name, "", -1)),
 							params.Service,
 							params.Domain)
@@ -222,7 +222,7 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 						continue
 					}
 					if _, ok := entries[rr.Hdr.Name]; !ok {
-						entries[rr.Hdr.Name] = NewServiceEntry(
+						entries[rr.Hdr.Name] = newServiceEntry(
 							trimDot(strings.Replace(rr.Hdr.Name, params.ServiceName(), "", 1)),
 							params.Service,
 							params.Domain)
@@ -237,7 +237,7 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 						continue
 					}
 					if _, ok := entries[rr.Hdr.Name]; !ok {
-						entries[rr.Hdr.Name] = NewServiceEntry(
+						entries[rr.Hdr.Name] = newServiceEntry(
 							trimDot(strings.Replace(rr.Hdr.Name, params.ServiceName(), "", 1)),
 							params.Service,
 							params.Domain)
