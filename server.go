@@ -26,7 +26,7 @@ var defaultTTL uint32 = 3200
 // Register a service by given arguments. This call will take the system's hostname
 // and lookup IP by that hostname.
 func Register(instance, service, domain string, port int, text []string, ifaces []net.Interface) (*Server, error) {
-	entry := NewServiceEntry(instance, service, domain)
+	entry := newServiceEntry(instance, service, domain)
 	entry.Port = port
 	entry.Text = text
 
@@ -84,7 +84,7 @@ func Register(instance, service, domain string, port int, text []string, ifaces 
 // RegisterProxy registers a service proxy. This call will skip the hostname/IP lookup and
 // will use the provided values.
 func RegisterProxy(instance, service, domain string, port int, host string, ips []string, text []string, ifaces []net.Interface) (*Server, error) {
-	entry := NewServiceEntry(instance, service, domain)
+	entry := newServiceEntry(instance, service, domain)
 	entry.Port = port
 	entry.Text = text
 	entry.HostName = host
