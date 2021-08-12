@@ -21,9 +21,9 @@ type IPType uint8
 
 // Options for IPType.
 const (
-	IPv4        = 0x01
-	IPv6        = 0x02
-	IPv4AndIPv6 = (IPv4 | IPv6) //< Default option.
+	IPv4        IPType = 0x01
+	IPv6        IPType = 0x02
+	IPv4AndIPv6        = IPv4 | IPv6 // default option
 )
 
 // Client structure encapsulates both IPv4/IPv6 UDP connections.
