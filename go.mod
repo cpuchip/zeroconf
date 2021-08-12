@@ -1,4 +1,4 @@
-module github.com/libp2p/zeroconf
+module github.com/libp2p/zeroconf/v2
 
 go 1.15
 
