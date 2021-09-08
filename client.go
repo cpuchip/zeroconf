@@ -382,11 +382,8 @@ func (c *client) periodicQuery(ctx context.Context, params *lookupParams) error 
 		if err := c.query(params); err != nil {
 			return err
 		}
-		// Backoff and cancel logic.
+		// Backoff logic
 		wait := bo.NextBackOff()
-		if wait == backoff.Stop {
-			return fmt.Errorf("periodicQuery: abort due to timeout")
-		}
 		if timer == nil {
 			timer = time.NewTimer(wait)
 		} else {
