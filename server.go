@@ -75,8 +75,7 @@ func Register(instance, service, domain string, port int, text []string, ifaces 
 	}
 
 	s.service = entry
-	go s.mainloop()
-	go s.probe()
+	s.start()
 
 	return s, nil
 }
@@ -132,8 +131,7 @@ func RegisterProxy(instance, service, domain string, port int, host string, ips 
 	}
 
 	s.service = entry
-	go s.mainloop()
-	go s.probe()
+	s.start()
 
 	return s, nil
 }
@@ -151,7 +149,7 @@ type Server struct {
 
 	shouldShutdown chan struct{}
 	shutdownLock   sync.Mutex
-	shutdownEnd    sync.WaitGroup
+	refCount       sync.WaitGroup
 	isShutdown     bool
 	ttl            uint32
 }
@@ -182,14 +180,16 @@ func newServer(ifaces []net.Interface) (*Server, error) {
 	return s, nil
 }
 
-// Start listeners and waits for the shutdown signal from exit channel
-func (s *Server) mainloop() {
+func (s *Server) start() {
 	if s.ipv4conn != nil {
+		s.refCount.Add(1)
 		go s.recv4(s.ipv4conn)
 	}
 	if s.ipv6conn != nil {
+		s.refCount.Add(1)
 		go s.recv6(s.ipv6conn)
 	}
+	go s.probe()
 }
 
 // Shutdown closes all udp connections and unregisters the service
@@ -228,20 +228,19 @@ func (s *Server) shutdown() error {
 	}
 
 	// Wait for connection and routines to be closed
-	s.shutdownEnd.Wait()
+	s.refCount.Wait()
 	s.isShutdown = true
 
 	return err
 }
 
-// recv is a long running routine to receive packets from an interface
+// recv4 is a long running routine to receive packets from an interface
 func (s *Server) recv4(c *ipv4.PacketConn) {
+	defer s.refCount.Done()
 	if c == nil {
 		return
 	}
 	buf := make([]byte, 65536)
-	s.shutdownEnd.Add(1)
-	defer s.shutdownEnd.Done()
 	for {
 		select {
 		case <-s.shouldShutdown:
@@ -260,14 +259,13 @@ func (s *Server) recv4(c *ipv4.PacketConn) {
 	}
 }
 
-// recv is a long running routine to receive packets from an interface
+// recv6 is a long running routine to receive packets from an interface
 func (s *Server) recv6(c *ipv6.PacketConn) {
+	defer s.refCount.Done()
 	if c == nil {
 		return
 	}
 	buf := make([]byte, 65536)
-	s.shutdownEnd.Add(1)
-	defer s.shutdownEnd.Done()
 	for {
 		select {
 		case <-s.shouldShutdown:
