@@ -557,11 +557,14 @@ func (s *Server) probe() {
 
 	randomizer := rand.New(rand.NewSource(time.Now().UnixNano()))
 
-	for i := 0; i < multicastRepetitions; i++ {
+	// Wait for a random duration uniformly distributed between 0 and 250 ms
+	// before sending the first probe packet.
+	time.Sleep(time.Duration(randomizer.Intn(250)) * time.Millisecond)
+	for i := 0; i < 3; i++ {
 		if err := s.multicastResponse(q, 0); err != nil {
 			log.Println("[ERR] zeroconf: failed to send probe:", err.Error())
 		}
-		time.Sleep(time.Duration(randomizer.Intn(250)) * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 	}
 
 	// From RFC6762
@@ -720,7 +723,7 @@ func (s *Server) unicastResponse(resp *dns.Msg, ifIndex int, from net.Addr) erro
 func (s *Server) multicastResponse(msg *dns.Msg, ifIndex int) error {
 	buf, err := msg.Pack()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to pack msg %v: %w", msg, err)
 	}
 	if s.ipv4conn != nil {
 		var wcm ipv4.ControlMessage
