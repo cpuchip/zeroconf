@@ -553,11 +553,9 @@ func (s *Server) probe() {
 	}
 	q.Ns = []dns.RR{srv, txt}
 
-	randomizer := rand.New(rand.NewSource(time.Now().UnixNano()))
-
 	// Wait for a random duration uniformly distributed between 0 and 250 ms
 	// before sending the first probe packet.
-	time.Sleep(time.Duration(randomizer.Intn(250)) * time.Millisecond)
+	time.Sleep(time.Duration(rand.Intn(250)) * time.Millisecond)
 	for i := 0; i < 3; i++ {
 		if err := s.multicastResponse(q, 0); err != nil {
 			log.Println("[ERR] zeroconf: failed to send probe:", err.Error())
