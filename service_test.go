@@ -143,11 +143,14 @@ func TestSubtype(t *testing.T) {
 	t.Run("ttl", func(t *testing.T) {
 		origTTL := defaultTTL
 		origCleanupFreq := cleanupFreq
-		defer func() {
+		origInitialQueryInterval := initialQueryInterval
+		t.Cleanup(func() {
 			defaultTTL = origTTL
 			cleanupFreq = origCleanupFreq
-		}()
-		defaultTTL = 2 // 2 seconds
+			initialQueryInterval = origInitialQueryInterval
+		})
+		defaultTTL = 1 // 1 second
+		initialQueryInterval = 100 * time.Millisecond
 		cleanupFreq = 100 * time.Millisecond
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -160,8 +163,8 @@ func TestSubtype(t *testing.T) {
 		}
 
 		<-ctx.Done()
-		if len(entries) != 2 {
-			t.Fatalf("Expected to have received 2 entries, but got %d", len(entries))
+		if len(entries) < 2 {
+			t.Fatalf("Expected to have received at least 2 entries, but got %d", len(entries))
 		}
 		res1 := <-entries
 		res2 := <-entries
