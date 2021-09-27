@@ -26,6 +26,8 @@ const (
 	IPv4AndIPv6        = IPv4 | IPv6 // default option
 )
 
+var initialQueryInterval = 4 * time.Second
+
 // Client structure encapsulates both IPv4/IPv6 UDP connections.
 type client struct {
 	ipv4conn *ipv4.PacketConn
@@ -371,7 +373,7 @@ func (c *client) periodicQuery(ctx context.Context, params *lookupParams) error 
 	}
 
 	const maxInterval = 60 * time.Second
-	interval := 4 * time.Second
+	interval := initialQueryInterval
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
 	for {
