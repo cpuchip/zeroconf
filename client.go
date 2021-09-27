@@ -3,11 +3,11 @@ package zeroconf
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"net"
 	"strings"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
 	"github.com/miekg/dns"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -365,31 +365,16 @@ func (c *client) recv(ctx context.Context, l interface{}, msgCh chan *dns.Msg) {
 // TODO: move error reporting to shutdown function as periodicQuery is called from
 // go routine context.
 func (c *client) periodicQuery(ctx context.Context, params *lookupParams) error {
-	bo := backoff.NewExponentialBackOff()
-	bo.InitialInterval = 4 * time.Second
-	bo.MaxInterval = 60 * time.Second
-	bo.MaxElapsedTime = 0
-	bo.Reset()
+	// Do the first query immediately.
+	if err := c.query(params); err != nil {
+		return err
+	}
 
-	var timer *time.Timer
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-	}()
+	const maxInterval = 60 * time.Second
+	interval := 4 * time.Second
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 	for {
-		// Do periodic query.
-		if err := c.query(params); err != nil {
-			return err
-		}
-		// Backoff logic
-		wait := bo.NextBackOff()
-		if timer == nil {
-			timer = time.NewTimer(wait)
-		} else {
-			timer.Reset(wait)
-		}
-
 		select {
 		case <-timer.C:
 			// Wait for next iteration.
@@ -403,6 +388,19 @@ func (c *client) periodicQuery(ctx context.Context, params *lookupParams) error 
 			}
 			return ctx.Err()
 		}
+
+		if err := c.query(params); err != nil {
+			return err
+		}
+		// Exponential increase of the interval with jitter:
+		// the new interval will be between 1.5x and 2.5x the old interval, capped at maxInterval.
+		if interval != maxInterval {
+			interval += time.Duration(rand.Int63n(interval.Nanoseconds())) + interval/2
+			if interval > maxInterval {
+				interval = maxInterval
+			}
+		}
+		timer.Reset(interval)
 	}
 }
 
