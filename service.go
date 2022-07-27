@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 )
 
 // ServiceRecord contains the basic description of a service, which contains instance name, service type & domain
@@ -36,8 +37,8 @@ func (s *ServiceRecord) ServiceTypeName() string {
 	return s.serviceTypeName
 }
 
-// NewServiceRecord constructs a ServiceRecord.
-func NewServiceRecord(instance, service string, domain string) *ServiceRecord {
+// newServiceRecord constructs a ServiceRecord.
+func newServiceRecord(instance, service string, domain string) *ServiceRecord {
 	service, subtypes := parseSubtypes(service)
 	s := &ServiceRecord{
 		Instance:    instance,
@@ -78,7 +79,7 @@ type lookupParams struct {
 // newLookupParams constructs a lookupParams.
 func newLookupParams(instance, service, domain string, isBrowsing bool, entries chan<- *ServiceEntry) *lookupParams {
 	p := &lookupParams{
-		ServiceRecord: *NewServiceRecord(instance, service, domain),
+		ServiceRecord: *newServiceRecord(instance, service, domain),
 		Entries:       entries,
 		isBrowsing:    isBrowsing,
 	}
@@ -103,17 +104,17 @@ func (l *lookupParams) disableProbing() {
 // used to answer multicast queries.
 type ServiceEntry struct {
 	ServiceRecord
-	HostName string   `json:"hostname"` // Host machine DNS name
-	Port     int      `json:"port"`     // Service Port
-	Text     []string `json:"text"`     // Service info served as a TXT record
-	TTL      uint32   `json:"ttl"`      // TTL of the service record
-	AddrIPv4 []net.IP `json:"-"`        // Host machine IPv4 address
-	AddrIPv6 []net.IP `json:"-"`        // Host machine IPv6 address
+	HostName string    `json:"hostname"` // Host machine DNS name
+	Port     int       `json:"port"`     // Service Port
+	Text     []string  `json:"text"`     // Service info served as a TXT record
+	Expiry   time.Time `json:"expiry"`   // Expiry of the service entry, will be converted to a TTL value
+	AddrIPv4 []net.IP  `json:"-"`        // Host machine IPv4 address
+	AddrIPv6 []net.IP  `json:"-"`        // Host machine IPv6 address
 }
 
-// NewServiceEntry constructs a ServiceEntry.
-func NewServiceEntry(instance, service string, domain string) *ServiceEntry {
+// newServiceEntry constructs a ServiceEntry.
+func newServiceEntry(instance, service string, domain string) *ServiceEntry {
 	return &ServiceEntry{
-		ServiceRecord: *NewServiceRecord(instance, service, domain),
+		ServiceRecord: *newServiceRecord(instance, service, domain),
 	}
 }

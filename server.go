@@ -1,12 +1,12 @@
 package zeroconf
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"math/rand"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -21,10 +21,39 @@ const (
 	multicastRepetitions = 2
 )
 
+var defaultTTL uint32 = 3200
+
+type serverOpts struct {
+	ttl uint32
+}
+
+func applyServerOpts(options ...ServerOption) serverOpts {
+	// Apply default configuration and load supplied options.
+	var conf = serverOpts{
+		ttl: defaultTTL,
+	}
+	for _, o := range options {
+		if o != nil {
+			o(&conf)
+		}
+	}
+	return conf
+}
+
+// ServerOption fills the option struct.
+type ServerOption func(*serverOpts)
+
+// TTL sets the TTL for DNS replies.
+func TTL(ttl uint32) ServerOption {
+	return func(o *serverOpts) {
+		o.ttl = ttl
+	}
+}
+
 // Register a service by given arguments. This call will take the system's hostname
 // and lookup IP by that hostname.
-func Register(instance, service, domain string, port int, text []string, ifaces []net.Interface) (*Server, error) {
-	entry := NewServiceEntry(instance, service, domain)
+func Register(instance, service, domain string, port int, text []string, ifaces []net.Interface, opts ...ServerOption) (*Server, error) {
+	entry := newServiceEntry(instance, service, domain)
 	entry.Port = port
 	entry.Text = text
 
@@ -67,22 +96,21 @@ func Register(instance, service, domain string, port int, text []string, ifaces 
 		return nil, fmt.Errorf("could not determine host IP addresses")
 	}
 
-	s, err := newServer(ifaces)
+	s, err := newServer(ifaces, applyServerOpts(opts...))
 	if err != nil {
 		return nil, err
 	}
 
 	s.service = entry
-	go s.mainloop()
-	go s.probe()
+	s.start()
 
 	return s, nil
 }
 
 // RegisterProxy registers a service proxy. This call will skip the hostname/IP lookup and
 // will use the provided values.
-func RegisterProxy(instance, service, domain string, port int, host string, ips []string, text []string, ifaces []net.Interface) (*Server, error) {
-	entry := NewServiceEntry(instance, service, domain)
+func RegisterProxy(instance, service, domain string, port int, host string, ips []string, text []string, ifaces []net.Interface, opts ...ServerOption) (*Server, error) {
+	entry := newServiceEntry(instance, service, domain)
 	entry.Port = port
 	entry.Text = text
 	entry.HostName = host
@@ -124,14 +152,13 @@ func RegisterProxy(instance, service, domain string, port int, host string, ips 
 		ifaces = listMulticastInterfaces()
 	}
 
-	s, err := newServer(ifaces)
+	s, err := newServer(ifaces, applyServerOpts(opts...))
 	if err != nil {
 		return nil, err
 	}
 
 	s.service = entry
-	go s.mainloop()
-	go s.probe()
+	s.start()
 
 	return s, nil
 }
@@ -149,13 +176,13 @@ type Server struct {
 
 	shouldShutdown chan struct{}
 	shutdownLock   sync.Mutex
-	shutdownEnd    sync.WaitGroup
+	refCount       sync.WaitGroup
 	isShutdown     bool
 	ttl            uint32
 }
 
 // Constructs server structure
-func newServer(ifaces []net.Interface) (*Server, error) {
+func newServer(ifaces []net.Interface, opts serverOpts) (*Server, error) {
 	ipv4conn, err4 := joinUdp4Multicast(ifaces)
 	if err4 != nil {
 		log.Printf("[zeroconf] no suitable IPv4 interface: %s", err4.Error())
@@ -173,26 +200,24 @@ func newServer(ifaces []net.Interface) (*Server, error) {
 		ipv4conn:       ipv4conn,
 		ipv6conn:       ipv6conn,
 		ifaces:         ifaces,
-		ttl:            3200,
+		ttl:            opts.ttl,
 		shouldShutdown: make(chan struct{}),
 	}
 
 	return s, nil
 }
 
-// Start listeners and waits for the shutdown signal from exit channel
-func (s *Server) mainloop() {
+func (s *Server) start() {
 	if s.ipv4conn != nil {
+		s.refCount.Add(1)
 		go s.recv4(s.ipv4conn)
 	}
 	if s.ipv6conn != nil {
+		s.refCount.Add(1)
 		go s.recv6(s.ipv6conn)
 	}
-}
-
-// Shutdown closes all udp connections and unregisters the service
-func (s *Server) Shutdown() {
-	s.shutdown()
+	s.refCount.Add(1)
+	go s.probe()
 }
 
 // SetText updates and announces the TXT records
@@ -202,19 +227,23 @@ func (s *Server) SetText(text []string) {
 }
 
 // TTL sets the TTL for DNS replies
+//
+// Deprecated: This method is racy. Use the TTL server option instead.
 func (s *Server) TTL(ttl uint32) {
 	s.ttl = ttl
 }
 
-// Shutdown server will close currently open connections & channel
-func (s *Server) shutdown() error {
+// Shutdown closes all udp connections and unregisters the service
+func (s *Server) Shutdown() {
 	s.shutdownLock.Lock()
 	defer s.shutdownLock.Unlock()
 	if s.isShutdown {
-		return errors.New("server is already shutdown")
+		return
 	}
 
-	err := s.unregister()
+	if err := s.unregister(); err != nil {
+		log.Printf("failed to unregister: %s", err)
+	}
 
 	close(s.shouldShutdown)
 
@@ -226,20 +255,17 @@ func (s *Server) shutdown() error {
 	}
 
 	// Wait for connection and routines to be closed
-	s.shutdownEnd.Wait()
+	s.refCount.Wait()
 	s.isShutdown = true
-
-	return err
 }
 
-// recv is a long running routine to receive packets from an interface
+// recv4 is a long running routine to receive packets from an interface
 func (s *Server) recv4(c *ipv4.PacketConn) {
+	defer s.refCount.Done()
 	if c == nil {
 		return
 	}
 	buf := make([]byte, 65536)
-	s.shutdownEnd.Add(1)
-	defer s.shutdownEnd.Done()
 	for {
 		select {
 		case <-s.shouldShutdown:
@@ -258,14 +284,13 @@ func (s *Server) recv4(c *ipv4.PacketConn) {
 	}
 }
 
-// recv is a long running routine to receive packets from an interface
+// recv6 is a long running routine to receive packets from an interface
 func (s *Server) recv6(c *ipv6.PacketConn) {
+	defer s.refCount.Done()
 	if c == nil {
 		return
 	}
 	buf := make([]byte, 65536)
-	s.shutdownEnd.Add(1)
-	defer s.shutdownEnd.Done()
 	for {
 		select {
 		case <-s.shouldShutdown:
@@ -526,6 +551,8 @@ func (s *Server) serviceTypeName(resp *dns.Msg, ttl uint32) {
 // Perform probing & announcement
 //TODO: implement a proper probing & conflict resolution
 func (s *Server) probe() {
+	defer s.refCount.Done()
+
 	q := new(dns.Msg)
 	q.SetQuestion(s.service.ServiceInstanceName(), dns.TypePTR)
 	q.RecursionDesired = false
@@ -553,13 +580,25 @@ func (s *Server) probe() {
 	}
 	q.Ns = []dns.RR{srv, txt}
 
-	randomizer := rand.New(rand.NewSource(time.Now().UnixNano()))
-
-	for i := 0; i < multicastRepetitions; i++ {
+	// Wait for a random duration uniformly distributed between 0 and 250 ms
+	// before sending the first probe packet.
+	timer := time.NewTimer(time.Duration(rand.Intn(250)) * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-s.shouldShutdown:
+		return
+	}
+	for i := 0; i < 3; i++ {
 		if err := s.multicastResponse(q, 0); err != nil {
 			log.Println("[ERR] zeroconf: failed to send probe:", err.Error())
 		}
-		time.Sleep(time.Duration(randomizer.Intn(250)) * time.Millisecond)
+		timer.Reset(250 * time.Millisecond)
+		select {
+		case <-timer.C:
+		case <-s.shouldShutdown:
+			return
+		}
 	}
 
 	// From RFC6762
@@ -568,7 +607,7 @@ func (s *Server) probe() {
 	//    packet loss, a responder MAY send up to eight unsolicited responses,
 	//    provided that the interval between unsolicited responses increases by
 	//    at least a factor of two with every response sent.
-	timeout := 1 * time.Second
+	timeout := time.Second
 	for i := 0; i < multicastRepetitions; i++ {
 		for _, intf := range s.ifaces {
 			resp := new(dns.Msg)
@@ -582,7 +621,12 @@ func (s *Server) probe() {
 				log.Println("[ERR] zeroconf: failed to send announcement:", err.Error())
 			}
 		}
-		time.Sleep(timeout)
+		timer.Reset(timeout)
+		select {
+		case <-timer.C:
+		case <-s.shouldShutdown:
+			return
+		}
 		timeout *= 2
 	}
 }
@@ -714,33 +758,69 @@ func (s *Server) unicastResponse(resp *dns.Msg, ifIndex int, from net.Addr) erro
 	}
 }
 
-// multicastResponse us used to send a multicast response packet
+// multicastResponse is used to send a multicast response packet
 func (s *Server) multicastResponse(msg *dns.Msg, ifIndex int) error {
 	buf, err := msg.Pack()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to pack msg %v: %w", msg, err)
 	}
 	if s.ipv4conn != nil {
+		// See https://pkg.go.dev/golang.org/x/net/ipv4#pkg-note-BUG
+		// As of Golang 1.18.4
+		// On Windows, the ControlMessage for ReadFrom and WriteTo methods of PacketConn is not implemented.
 		var wcm ipv4.ControlMessage
 		if ifIndex != 0 {
-			wcm.IfIndex = ifIndex
+			switch runtime.GOOS {
+			case "darwin", "ios", "linux":
+				wcm.IfIndex = ifIndex
+			default:
+				iface, _ := net.InterfaceByIndex(ifIndex)
+				if err := s.ipv4conn.SetMulticastInterface(iface); err != nil {
+					log.Printf("[WARN] mdns: Failed to set multicast interface: %v", err)
+				}
+			}
 			s.ipv4conn.WriteTo(buf, &wcm, ipv4Addr)
 		} else {
 			for _, intf := range s.ifaces {
-				wcm.IfIndex = intf.Index
+				switch runtime.GOOS {
+				case "darwin", "ios", "linux":
+					wcm.IfIndex = intf.Index
+				default:
+					if err := s.ipv4conn.SetMulticastInterface(&intf); err != nil {
+						log.Printf("[WARN] mdns: Failed to set multicast interface: %v", err)
+					}
+				}
 				s.ipv4conn.WriteTo(buf, &wcm, ipv4Addr)
 			}
 		}
 	}
 
 	if s.ipv6conn != nil {
+		// See https://pkg.go.dev/golang.org/x/net/ipv6#pkg-note-BUG
+		// As of Golang 1.18.4
+		// On Windows, the ControlMessage for ReadFrom and WriteTo methods of PacketConn is not implemented.
 		var wcm ipv6.ControlMessage
 		if ifIndex != 0 {
-			wcm.IfIndex = ifIndex
+			switch runtime.GOOS {
+			case "darwin", "ios", "linux":
+				wcm.IfIndex = ifIndex
+			default:
+				iface, _ := net.InterfaceByIndex(ifIndex)
+				if err := s.ipv6conn.SetMulticastInterface(iface); err != nil {
+					log.Printf("[WARN] mdns: Failed to set multicast interface: %v", err)
+				}
+			}
 			s.ipv6conn.WriteTo(buf, &wcm, ipv6Addr)
 		} else {
 			for _, intf := range s.ifaces {
-				wcm.IfIndex = intf.Index
+				switch runtime.GOOS {
+				case "darwin", "ios", "linux":
+					wcm.IfIndex = intf.Index
+				default:
+					if err := s.ipv6conn.SetMulticastInterface(&intf); err != nil {
+						log.Printf("[WARN] mdns: Failed to set multicast interface: %v", err)
+					}
+				}
 				s.ipv6conn.WriteTo(buf, &wcm, ipv6Addr)
 			}
 		}

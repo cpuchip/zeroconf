@@ -15,26 +15,19 @@ Though it does not support all requirements yet, the aim is to provide a complia
 By now, it should be compatible to [Avahi](http://avahi.org/) (tested) and Apple's Bonjour (untested).
 Target environments: private LAN/Wifi, small or isolated networks.
 
-[![GoDoc](https://godoc.org/github.com/grandcat/zeroconf?status.svg)](https://godoc.org/github.com/grandcat/zeroconf)
-[![Go Report Card](https://goreportcard.com/badge/github.com/grandcat/zeroconf)](https://goreportcard.com/report/github.com/grandcat/zeroconf)
-[![Tests](https://github.com/grandcat/zeroconf/actions/workflows/go-test.yml/badge.svg)](https://github.com/grandcat/zeroconf/actions/workflows/go-test.yml)
+[![GoDoc](https://godoc.org/github.com/cpuchip/zeroconf?status.svg)](https://godoc.org/github.com/cpuchip/zeroconf)
+[![Go Report Card](https://goreportcard.com/badge/github.com/cpuchip/zeroconf)](https://goreportcard.com/report/github.com/cpuchip/zeroconf)
+[![Tests](https://github.com/cpuchip/zeroconf/actions/workflows/go-test.yml/badge.svg)](https://github.com/cpuchip/zeroconf/actions/workflows/go-test.yml)
 
 ## Install
 Nothing is as easy as that:
 ```bash
-$ go get -u github.com/grandcat/zeroconf
+$ go get -u github.com/cpuchip/zeroconf/v2
 ```
-This package requires **Go 1.7** (context in std lib) or later.
 
 ## Browse for services in your local network
 
 ```go
-// Discover all services on the network (e.g. _workstation._tcp)
-resolver, err := zeroconf.NewResolver(nil)
-if err != nil {
-    log.Fatalln("Failed to initialize resolver:", err.Error())
-}
-
 entries := make(chan *zeroconf.ServiceEntry)
 go func(results <-chan *zeroconf.ServiceEntry) {
     for entry := range results {
@@ -45,7 +38,8 @@ go func(results <-chan *zeroconf.ServiceEntry) {
 
 ctx, cancel := context.WithTimeout(context.Background(), time.Second*15)
 defer cancel()
-err = resolver.Browse(ctx, "_workstation._tcp", "local.", entries)
+// Discover all services on the network (e.g. _workstation._tcp)
+err = zeroconf.Browse(ctx, "_workstation._tcp", "local.", entries)
 if err != nil {
     log.Fatalln("Failed to browse:", err.Error())
 }
@@ -54,7 +48,7 @@ if err != nil {
 ```
 A subtype may added to service name to narrow the set of results. E.g. to browse `_workstation._tcp` with subtype `_windows`, use`_workstation._tcp,_windows`.
 
-See https://github.com/grandcat/zeroconf/blob/master/examples/resolv/client.go.
+See https://github.com/cpuchip/zeroconf/blob/master/examples/resolv/client.go.
 
 ## Lookup a specific service instance
 
@@ -85,7 +79,7 @@ log.Println("Shutting down.")
 ```
 Multiple subtypes may be added to service name, separated by commas. E.g `_workstation._tcp,_windows` has subtype `_windows`.
 
-See https://github.com/grandcat/zeroconf/blob/master/examples/register/server.go.
+See https://github.com/cpuchip/zeroconf/blob/master/examples/register/server.go.
 
 ## Features and ToDo's
 This list gives a quick impression about the state of this library.
@@ -94,7 +88,7 @@ See what needs to be done and submit a pull request :)
 * [x] Browse / Lookup / Register services
 * [x] Multiple IPv6 / IPv4 addresses support
 * [x] Send multiple probes (exp. back-off) if no service answers (*)
-* [ ] Timestamp entries for TTL checks
+* [x] Timestamp entries for TTL checks
 * [ ] Compare new multicasts with already received services
 
 _Notes:_

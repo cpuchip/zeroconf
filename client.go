@@ -3,11 +3,13 @@ package zeroconf
 import (
 	"context"
 	"fmt"
+	"log"
+	"math/rand"
 	"net"
+	"runtime"
 	"strings"
 	"time"
 
-	"github.com/cenkalti/backoff"
 	"github.com/miekg/dns"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -21,10 +23,19 @@ type IPType uint8
 
 // Options for IPType.
 const (
-	IPv4        = 0x01
-	IPv6        = 0x02
-	IPv4AndIPv6 = (IPv4 | IPv6) //< Default option.
+	IPv4        IPType = 0x01
+	IPv6        IPType = 0x02
+	IPv4AndIPv6        = IPv4 | IPv6 // default option
 )
+
+var initialQueryInterval = 4 * time.Second
+
+// Client structure encapsulates both IPv4/IPv6 UDP connections.
+type client struct {
+	ipv4conn *ipv4.PacketConn
+	ipv6conn *ipv6.PacketConn
+	ifaces   []net.Interface
+}
 
 type clientOpts struct {
 	listenOn IPType
@@ -52,14 +63,41 @@ func SelectIfaces(ifaces []net.Interface) ClientOption {
 	}
 }
 
-// Resolver acts as entry point for service lookups and to browse the DNS-SD.
-type Resolver struct {
-	c *client
+// Browse for all services of a given type in a given domain.
+// Received entries are sent on the entries channel.
+// It blocks until the context is canceled (or an error occurs).
+func Browse(ctx context.Context, service, domain string, entries chan<- *ServiceEntry, opts ...ClientOption) error {
+	cl, err := newClient(applyOpts(opts...))
+	if err != nil {
+		return err
+	}
+	params := defaultParams(service)
+	if domain != "" {
+		params.Domain = domain
+	}
+	params.Entries = entries
+	params.isBrowsing = true
+	return cl.run(ctx, params)
 }
 
-// NewResolver creates a new resolver and joins the UDP multicast groups to
-// listen for mDNS messages.
-func NewResolver(options ...ClientOption) (*Resolver, error) {
+// Lookup a specific service by its name and type in a given domain.
+// Received entries are sent on the entries channel.
+// It blocks until the context is canceled (or an error occurs).
+func Lookup(ctx context.Context, instance, service, domain string, entries chan<- *ServiceEntry, opts ...ClientOption) error {
+	cl, err := newClient(applyOpts(opts...))
+	if err != nil {
+		return err
+	}
+	params := defaultParams(service)
+	params.Instance = instance
+	if domain != "" {
+		params.Domain = domain
+	}
+	params.Entries = entries
+	return cl.run(ctx, params)
+}
+
+func applyOpts(options ...ClientOption) clientOpts {
 	// Apply default configuration and load supplied options.
 	var conf = clientOpts{
 		listenOn: IPv4AndIPv6,
@@ -69,80 +107,28 @@ func NewResolver(options ...ClientOption) (*Resolver, error) {
 			o(&conf)
 		}
 	}
-
-	c, err := newClient(conf)
-	if err != nil {
-		return nil, err
-	}
-	return &Resolver{
-		c: c,
-	}, nil
+	return conf
 }
 
-// Browse for all services of a given type in a given domain.
-func (r *Resolver) Browse(ctx context.Context, service, domain string, entries chan<- *ServiceEntry) error {
-	params := defaultParams(service)
-	if domain != "" {
-		params.Domain = domain
-	}
-	params.Entries = entries
-	params.isBrowsing = true
+func (c *client) run(ctx context.Context, params *lookupParams) error {
 	ctx, cancel := context.WithCancel(ctx)
-	go r.c.mainloop(ctx, params)
-
-	err := r.c.query(params)
-	if err != nil {
-		cancel()
-		return err
-	}
-	// If previous probe was ok, it should be fine now. In case of an error later on,
-	// the entries' queue is closed.
+	done := make(chan struct{})
 	go func() {
-		if err := r.c.periodicQuery(ctx, params); err != nil {
-			cancel()
-		}
+		defer close(done)
+		c.mainloop(ctx, params)
 	}()
 
-	return nil
-}
-
-// Lookup a specific service by its name and type in a given domain.
-func (r *Resolver) Lookup(ctx context.Context, instance, service, domain string, entries chan<- *ServiceEntry) error {
-	params := defaultParams(service)
-	params.Instance = instance
-	if domain != "" {
-		params.Domain = domain
-	}
-	params.Entries = entries
-	ctx, cancel := context.WithCancel(ctx)
-	go r.c.mainloop(ctx, params)
-	err := r.c.query(params)
-	if err != nil {
-		// cancel mainloop
-		cancel()
-		return err
-	}
 	// If previous probe was ok, it should be fine now. In case of an error later on,
 	// the entries' queue is closed.
-	go func() {
-		if err := r.c.periodicQuery(ctx, params); err != nil {
-			cancel()
-		}
-	}()
-
-	return nil
+	err := c.periodicQuery(ctx, params)
+	cancel()
+	<-done
+	return err
 }
 
 // defaultParams returns a default set of QueryParams.
 func defaultParams(service string) *lookupParams {
 	return newLookupParams("", service, "local", false, make(chan *ServiceEntry))
-}
-
-// Client structure encapsulates both IPv4/IPv6 UDP connections.
-type client struct {
-	ipv4conn *ipv4.PacketConn
-	ipv6conn *ipv6.PacketConn
-	ifaces   []net.Interface
 }
 
 // Client structure constructor
@@ -177,6 +163,8 @@ func newClient(opts clientOpts) (*client, error) {
 	}, nil
 }
 
+var cleanupFreq = 10 * time.Second
+
 // Start listeners and waits for the shutdown signal from exit channel
 func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 	// start listening for responses
@@ -189,16 +177,28 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 	}
 
 	// Iterate through channels from listeners goroutines
-	var entries, sentEntries map[string]*ServiceEntry
-	sentEntries = make(map[string]*ServiceEntry)
+	var entries map[string]*ServiceEntry
+	sentEntries := make(map[string]*ServiceEntry)
+
+	ticker := time.NewTicker(cleanupFreq)
+	defer ticker.Stop()
 	for {
+		var now time.Time
 		select {
 		case <-ctx.Done():
 			// Context expired. Notify subscriber that we are done here.
 			params.done()
 			c.shutdown()
 			return
+		case t := <-ticker.C:
+			for k, e := range sentEntries {
+				if t.After(e.Expiry) {
+					delete(sentEntries, k)
+				}
+			}
+			continue
 		case msg := <-msgCh:
+			now = time.Now()
 			entries = make(map[string]*ServiceEntry)
 			sections := append(msg.Answer, msg.Ns...)
 			sections = append(sections, msg.Extra...)
@@ -213,12 +213,12 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 						continue
 					}
 					if _, ok := entries[rr.Ptr]; !ok {
-						entries[rr.Ptr] = NewServiceEntry(
+						entries[rr.Ptr] = newServiceEntry(
 							trimDot(strings.Replace(rr.Ptr, rr.Hdr.Name, "", -1)),
 							params.Service,
 							params.Domain)
 					}
-					entries[rr.Ptr].TTL = rr.Hdr.Ttl
+					entries[rr.Ptr].Expiry = now.Add(time.Duration(rr.Hdr.Ttl) * time.Second)
 				case *dns.SRV:
 					if params.ServiceInstanceName() != "" && params.ServiceInstanceName() != rr.Hdr.Name {
 						continue
@@ -226,14 +226,14 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 						continue
 					}
 					if _, ok := entries[rr.Hdr.Name]; !ok {
-						entries[rr.Hdr.Name] = NewServiceEntry(
+						entries[rr.Hdr.Name] = newServiceEntry(
 							trimDot(strings.Replace(rr.Hdr.Name, params.ServiceName(), "", 1)),
 							params.Service,
 							params.Domain)
 					}
 					entries[rr.Hdr.Name].HostName = rr.Target
 					entries[rr.Hdr.Name].Port = int(rr.Port)
-					entries[rr.Hdr.Name].TTL = rr.Hdr.Ttl
+					entries[rr.Hdr.Name].Expiry = now.Add(time.Duration(rr.Hdr.Ttl) * time.Second)
 				case *dns.TXT:
 					if params.ServiceInstanceName() != "" && params.ServiceInstanceName() != rr.Hdr.Name {
 						continue
@@ -241,13 +241,13 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 						continue
 					}
 					if _, ok := entries[rr.Hdr.Name]; !ok {
-						entries[rr.Hdr.Name] = NewServiceEntry(
+						entries[rr.Hdr.Name] = newServiceEntry(
 							trimDot(strings.Replace(rr.Hdr.Name, params.ServiceName(), "", 1)),
 							params.Service,
 							params.Domain)
 					}
 					entries[rr.Hdr.Name].Text = rr.Txt
-					entries[rr.Hdr.Name].TTL = rr.Hdr.Ttl
+					entries[rr.Hdr.Name].Expiry = now.Add(time.Duration(rr.Hdr.Ttl) * time.Second)
 				}
 			}
 			// Associate IPs in a second round as other fields should be filled by now.
@@ -271,7 +271,7 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 
 		if len(entries) > 0 {
 			for k, e := range entries {
-				if e.TTL == 0 {
+				if !e.Expiry.After(now) {
 					delete(entries, k)
 					delete(sentEntries, k)
 					continue
@@ -369,29 +369,16 @@ func (c *client) recv(ctx context.Context, l interface{}, msgCh chan *dns.Msg) {
 // TODO: move error reporting to shutdown function as periodicQuery is called from
 // go routine context.
 func (c *client) periodicQuery(ctx context.Context, params *lookupParams) error {
-	bo := backoff.NewExponentialBackOff()
-	bo.InitialInterval = 4 * time.Second
-	bo.MaxInterval = 60 * time.Second
-	bo.MaxElapsedTime = 0
-	bo.Reset()
+	// Do the first query immediately.
+	if err := c.query(params); err != nil {
+		return err
+	}
 
-	var timer *time.Timer
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-	}()
+	const maxInterval = 60 * time.Second
+	interval := initialQueryInterval
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 	for {
-		// Backoff and cancel logic.
-		wait := bo.NextBackOff()
-		if wait == backoff.Stop {
-			return fmt.Errorf("periodicQuery: abort due to timeout")
-		}
-		if timer == nil {
-			timer = time.NewTimer(wait)
-		} else {
-			timer.Reset(wait)
-		}
 		select {
 		case <-timer.C:
 			// Wait for next iteration.
@@ -400,12 +387,24 @@ func (c *client) periodicQuery(ctx context.Context, params *lookupParams) error 
 			// Done here. Received a matching mDNS entry.
 			return nil
 		case <-ctx.Done():
+			if params.isBrowsing {
+				return nil
+			}
 			return ctx.Err()
 		}
-		// Do periodic query.
+
 		if err := c.query(params); err != nil {
 			return err
 		}
+		// Exponential increase of the interval with jitter:
+		// the new interval will be between 1.5x and 2.5x the old interval, capped at maxInterval.
+		if interval != maxInterval {
+			interval += time.Duration(rand.Int63n(interval.Nanoseconds())) + interval/2
+			if interval > maxInterval {
+				interval = maxInterval
+			}
+		}
+		timer.Reset(interval)
 	}
 }
 
@@ -429,11 +428,7 @@ func (c *client) query(params *lookupParams) error {
 		m.SetQuestion(serviceName, dns.TypePTR)
 	}
 	m.RecursionDesired = false
-	if err := c.sendQuery(m); err != nil {
-		return err
-	}
-
-	return nil
+	return c.sendQuery(m)
 }
 
 // Pack the dns.Msg and write to available connections (multicast)
@@ -443,16 +438,36 @@ func (c *client) sendQuery(msg *dns.Msg) error {
 		return err
 	}
 	if c.ipv4conn != nil {
+		// See https://pkg.go.dev/golang.org/x/net/ipv4#pkg-note-BUG
+		// As of Golang 1.18.4
+		// On Windows, the ControlMessage for ReadFrom and WriteTo methods of PacketConn is not implemented.
 		var wcm ipv4.ControlMessage
 		for ifi := range c.ifaces {
-			wcm.IfIndex = c.ifaces[ifi].Index
+			switch runtime.GOOS {
+			case "darwin", "ios", "linux":
+				wcm.IfIndex = c.ifaces[ifi].Index
+			default:
+				if err := c.ipv4conn.SetMulticastInterface(&c.ifaces[ifi]); err != nil {
+					log.Printf("[WARN] mdns: Failed to set multicast interface: %v", err)
+				}
+			}
 			c.ipv4conn.WriteTo(buf, &wcm, ipv4Addr)
 		}
 	}
 	if c.ipv6conn != nil {
+		// See https://pkg.go.dev/golang.org/x/net/ipv6#pkg-note-BUG
+		// As of Golang 1.18.4
+		// On Windows, the ControlMessage for ReadFrom and WriteTo methods of PacketConn is not implemented.
 		var wcm ipv6.ControlMessage
 		for ifi := range c.ifaces {
-			wcm.IfIndex = c.ifaces[ifi].Index
+			switch runtime.GOOS {
+			case "darwin", "ios", "linux":
+				wcm.IfIndex = c.ifaces[ifi].Index
+			default:
+				if err := c.ipv6conn.SetMulticastInterface(&c.ifaces[ifi]); err != nil {
+					log.Printf("[WARN] mdns: Failed to set multicast interface: %v", err)
+				}
+			}
 			c.ipv6conn.WriteTo(buf, &wcm, ipv6Addr)
 		}
 	}

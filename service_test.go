@@ -5,8 +5,6 @@ import (
 	"log"
 	"testing"
 	"time"
-
-	"github.com/pkg/errors"
 )
 
 var (
@@ -17,35 +15,44 @@ var (
 	mdnsPort    = 8888
 )
 
-func startMDNS(ctx context.Context, port int, name, service, domain string) {
+func startMDNS(t *testing.T, port int, name, service, domain string) {
 	// 5353 is default mdns port
 	server, err := Register(name, service, domain, port, []string{"txtv=0", "lo=1", "la=2"}, nil)
 	if err != nil {
-		panic(errors.Wrap(err, "while registering mdns service"))
+		t.Fatalf("error while registering mdns service: %s", err)
 	}
-	defer server.Shutdown()
+	t.Cleanup(server.Shutdown)
 	log.Printf("Published service: %s, type: %s, domain: %s", name, service, domain)
+}
 
-	<-ctx.Done()
+func TestQuickShutdown(t *testing.T) {
+	server, err := Register(mdnsName, mdnsService, mdnsDomain, mdnsPort, []string{"txtv=0", "lo=1", "la=2"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	log.Printf("Shutting down.")
-
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.Shutdown()
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("shutdown took longer than 500ms")
+	}
 }
 
 func TestBasic(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	go startMDNS(ctx, mdnsPort, mdnsName, mdnsService, mdnsDomain)
+	startMDNS(t, mdnsPort, mdnsName, mdnsService, mdnsDomain)
 
 	time.Sleep(time.Second)
 
-	resolver, err := NewResolver(nil)
-	if err != nil {
-		t.Fatalf("Expected create resolver success, but got %v", err)
-	}
 	entries := make(chan *ServiceEntry, 100)
-	if err := resolver.Browse(ctx, mdnsService, mdnsDomain, entries); err != nil {
+	if err := Browse(ctx, mdnsService, mdnsDomain, entries); err != nil {
 		t.Fatalf("Expected browse success, but got %v", err)
 	}
 	<-ctx.Done()
@@ -69,11 +76,6 @@ func TestBasic(t *testing.T) {
 }
 
 func TestNoRegister(t *testing.T) {
-	resolver, err := NewResolver(nil)
-	if err != nil {
-		t.Fatalf("Expected create resolver success, but got %v", err)
-	}
-
 	// before register, mdns resolve shuold not have any entry
 	entries := make(chan *ServiceEntry)
 	go func(results <-chan *ServiceEntry) {
@@ -84,7 +86,7 @@ func TestNoRegister(t *testing.T) {
 	}(entries)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := resolver.Browse(ctx, mdnsService, mdnsDomain, entries); err != nil {
+	if err := Browse(ctx, mdnsService, mdnsDomain, entries); err != nil {
 		t.Fatalf("Expected browse success, but got %v", err)
 	}
 	<-ctx.Done()
@@ -96,16 +98,12 @@ func TestSubtype(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		go startMDNS(ctx, mdnsPort, mdnsName, mdnsSubtype, mdnsDomain)
+		startMDNS(t, mdnsPort, mdnsName, mdnsSubtype, mdnsDomain)
 
 		time.Sleep(time.Second)
 
-		resolver, err := NewResolver(nil)
-		if err != nil {
-			t.Fatalf("Expected create resolver success, but got %v", err)
-		}
 		entries := make(chan *ServiceEntry, 100)
-		if err := resolver.Browse(ctx, mdnsSubtype, mdnsDomain, entries); err != nil {
+		if err := Browse(ctx, mdnsSubtype, mdnsDomain, entries); err != nil {
 			t.Fatalf("Expected browse success, but got %v", err)
 		}
 		<-ctx.Done()
@@ -132,16 +130,12 @@ func TestSubtype(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		go startMDNS(ctx, mdnsPort, mdnsName, mdnsSubtype, mdnsDomain)
+		startMDNS(t, mdnsPort, mdnsName, mdnsSubtype, mdnsDomain)
 
 		time.Sleep(time.Second)
 
-		resolver, err := NewResolver(nil)
-		if err != nil {
-			t.Fatalf("Expected create resolver success, but got %v", err)
-		}
 		entries := make(chan *ServiceEntry, 100)
-		if err := resolver.Browse(ctx, mdnsService, mdnsDomain, entries); err != nil {
+		if err := Browse(ctx, mdnsService, mdnsDomain, entries); err != nil {
 			t.Fatalf("Expected browse success, but got %v", err)
 		}
 		<-ctx.Done()
@@ -161,6 +155,39 @@ func TestSubtype(t *testing.T) {
 		}
 		if result.Port != mdnsPort {
 			t.Fatalf("Expected port is %d, but got %d", mdnsPort, result.Port)
+		}
+	})
+
+	t.Run("ttl", func(t *testing.T) {
+		origTTL := defaultTTL
+		origCleanupFreq := cleanupFreq
+		origInitialQueryInterval := initialQueryInterval
+		t.Cleanup(func() {
+			defaultTTL = origTTL
+			cleanupFreq = origCleanupFreq
+			initialQueryInterval = origInitialQueryInterval
+		})
+		defaultTTL = 1 // 1 second
+		initialQueryInterval = 100 * time.Millisecond
+		cleanupFreq = 100 * time.Millisecond
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		startMDNS(t, mdnsPort, mdnsName, mdnsSubtype, mdnsDomain)
+
+		entries := make(chan *ServiceEntry, 100)
+		if err := Browse(ctx, mdnsService, mdnsDomain, entries); err != nil {
+			t.Fatalf("Expected browse success, but got %v", err)
+		}
+
+		<-ctx.Done()
+		if len(entries) < 2 {
+			t.Fatalf("Expected to have received at least 2 entries, but got %d", len(entries))
+		}
+		res1 := <-entries
+		res2 := <-entries
+		if res1.ServiceInstanceName() != res2.ServiceInstanceName() {
+			t.Fatalf("expected the two entries to be identical")
 		}
 	})
 }
