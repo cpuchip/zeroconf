@@ -6,7 +6,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/libp2p/zeroconf/v2"
+	"github.com/cpuchip/zeroconf/v2"
 )
 
 var (
